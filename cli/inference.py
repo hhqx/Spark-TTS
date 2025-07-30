@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--model_dir",
         type=str,
-        default="pretrained_models/Spark-TTS-0.5B",
+        default="/nfs/pretrained_models/Spark-TTS-0.5B",
         help="Path to the model directory",
     )
     parser.add_argument(

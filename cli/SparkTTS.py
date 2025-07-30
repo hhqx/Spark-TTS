@@ -228,6 +228,9 @@ class SparkTTS:
             )
 
         # Convert semantic tokens back to waveform
+        if pred_semantic_ids.numel() == 0:
+            return None
+        
         wav = self.audio_tokenizer.detokenize(
             global_token_ids.to(self.device).squeeze(0),
             pred_semantic_ids.to(self.device),
