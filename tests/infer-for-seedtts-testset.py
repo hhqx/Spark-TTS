@@ -1,18 +1,16 @@
-# Copyright (c) 2025 SparkAudio
-#               2025 Xinsheng Wang (w.xinshawn@gmail.com)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""
+This is a script to perform TTS inference on the SeedTTS test dataset (linux only).
+It uses multiprocessing to handle multiple GPUs and saves the generated audio files.
 
+usage:
+
+# test wer test set
+    python tests/infer-for-seedtts-testset.py --dataset_split test_wer --save_dir outputs/seedtts/wer
+
+# test sim test set
+    python tests/infer-for-seedtts-testset.py --dataset_split test_sim --save_dir outputs/seedtts/sim
+
+"""
 
 import os
 import argparse
@@ -20,7 +18,6 @@ import torch
 import soundfile as sf
 import logging
 from datetime import datetime
-import platform
 import json
 import queue
 from tqdm import tqdm
@@ -34,7 +31,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cli.SparkTTS import SparkTTS
 
-from py3_tools.py_debug import breakpoint
 
 def parse_args():
     """Parse command-line arguments."""
@@ -43,24 +39,25 @@ def parse_args():
     parser.add_argument(
         "--model_dir",
         type=str,
-        default="/nfs/pretrained_models/Spark-TTS-0.5B",
+        default="pretrained_models/Spark-TTS-0.5B",
         help="Path to the model directory",
     )
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="example/seedtts-results",
+        default="outputs/seedtts/wer",
         help="Directory to save generated audio files",
     )
-    parser.add_argument("--device", type=int, default=0, help="CUDA device number")
+    parser.add_argument("--cuda_visible_devices", type=str, default=None, help="CUDA visible devices, e.g., '0,1,2'")
     parser.add_argument(
-        "--text", default='hell, how are you', type=str, required=False, help="Text for TTS generation"
+        "--dataset_path", default='hhqx/seedtts_testset', type=str, required=False, help="Path to the seedtts test dataset"
     )
-    parser.add_argument("--prompt_text", type=str, help="Transcript of prompt audio")
+    parser.add_argument("--dataset_lang_config", choices=["en", "zh"], default="en", help="Language of the test dataset")
     parser.add_argument(
-        "--prompt_speech_path",
-        type=str,
-        help="Path to the prompt audio file",
+        "--dataset_split",
+        choices=['test_wer', 'test_sim'],
+        default='test_wer',
+        help="Split of the dataset to use for inference",
     )
     parser.add_argument("--gender", choices=["male", "female"])
     parser.add_argument(
@@ -115,18 +112,20 @@ def process_rank(rank, args, input_queue: mp.Queue, output_queue: mp.Queue):
             output_name = item['audio_output_path']
 
             item['audio_output_path'] = os.path.join(out_wav_dir, output_name)
+            item['audio_output_path'] = os.path.abspath(item['audio_output_path'])
+            
             save_path = os.path.join(out_wav_dir, output_name)
             save_path = os.path.abspath(save_path)
             
-            res = {
-                'index': item.get('index', f"rank{rank}_{item_count}"),
-                'text': text,
-                'wav_path': save_path,
-                'ref_wav_path': prompt_speech_path,
-                'prompt_text': prompt_text
-            }
+            # res = {
+            #     'index': item.get('index', f"rank{rank}_{item_count}"),
+            #     'text': text,
+            #     'wav_path': save_path,
+            #     'ref_wav_path': prompt_speech_path,
+            #     'prompt_text': prompt_text
+            # }
+            res = item.copy()
             
-            breakpoint()
             if os.path.exists(save_path):
                 logging.info(f"Rank {rank} - File already exists: {save_path}, skipping inference.")
             else:
@@ -143,11 +142,14 @@ def process_rank(rank, args, input_queue: mp.Queue, output_queue: mp.Queue):
                             speed=args.speed,
                         )
                     except Exception as e:
+                        import traceback
+                        traceback.print_exc()
                         logging.error(f"Rank {rank} - Error during inference for text '{text}': {str(e)}", exc_info=True)
                         wav = None
                     
                     if wav is None:
                         res['wav_path'] = ''
+                        res['audio_output_path'] = ''
                         logging.warning(f"Rank {rank} - Skipping empty output for text: {text}")
                     else:
                         sf.write(save_path, wav, samplerate=16000)
@@ -167,8 +169,10 @@ def main(config):
     mp.set_start_method('spawn', force=True)
     
     ## load dataset
-    input_dataset_path = '/hy-netdisk/datasets_processed/seedtts_testset'
-    dataset = load_dataset(input_dataset_path,**{"name": "en", "split": "test_wer"})
+    dataset = load_dataset(
+        config.dataset_path,
+        **{"name": config.dataset_lang_config, "split": config.dataset_split}
+        )
     
     # Convert dataset to list of dicts with proper indexing
     df = dataset.to_pandas()
@@ -252,6 +256,7 @@ def main(config):
     output_dir = config.save_dir
     os.makedirs(output_dir, exist_ok=True)
     
+    # save json file
     with open(os.path.join(output_dir, f'text_wav_{os.path.basename(output_dir)}.json'), 'w') as f:
         json.dump(text_wav_pairs, f, ensure_ascii=False, indent=4)
     
@@ -260,9 +265,50 @@ def main(config):
     
     print("Text and wav pairs saved to (len={}, error_wav={}): {} \n".format(
             len(text_wav_pairs),
-            sum(1 for item in text_wav_pairs if not item['wav_path']),
+            sum(1 for item in text_wav_pairs if not item['audio_output_path']),
             os.path.join(output_dir, f'text_wav_{os.path.basename(output_dir)}.json')
         ))
+
+    # save .lst file for seedtts evaluation
+    lst_file_path = os.path.join(
+        output_dir, 
+        'result_{}_{}_model_{}.lst'.format(
+            config.dataset_lang_config, config.dataset_split, os.path.basename(config.model_dir)
+        )
+    )
+    
+    with open(lst_file_path, 'w') as f:
+        # dataset[0]: dict_keys(['audio_output_path', 'prompt_text', 'prompt_audio', 'text_input', 'audio_ground_truth'])
+        for item in text_wav_pairs:
+            line = "|".join([
+                os.path.splitext(os.path.basename(item['audio_output_path']))[0],
+                item['prompt_text'],
+                item['prompt_audio'],
+                item['text_input'],
+                item['audio_ground_truth']
+            ]) + "\n"
+            f.write(line)
+    logging.info(f"Successfully saved .lst file to (len={len(text_wav_pairs)}): {lst_file_path}")
+    
+    print('\n\n-------------- Commands to do seedtts tests using generated wavs -----------------------------')
+    print(f"Successfully saved .lst file to (len={len(text_wav_pairs)}): {lst_file_path}")
+    seed_repo_url = 'https://github.com/BytedanceSpeech/seed-tts-eval'
+    synth_wav_dir = os.path.join(os.path.abspath(config.save_dir), 'wav')
+    lst_file_path = os.path.abspath(lst_file_path)
+    tpl = 'Use the following command (from "{seed_repo_url}") to evaluate the results:'.format(seed_repo_url=seed_repo_url)
+    cmd1 = 'bash cal_wer.sh {the path of .lst meta file} {the directory of synthesized audio} en'
+    cmd2 = 'bash cal_sim.sh {the path of .lst meta file} {the directory of synthesized audio} {path/wavlm_large_finetune.pth}'
+    print(tpl)
+    print(f'''```bash
+# For WER evaluation:
+# bash cal_wer.sh {{the path of .lst meta file}} {{the directory of synthesized audio}} en
+bash cal_wer.sh {lst_file_path} {synth_wav_dir} en
+
+# For SIM evaluation:
+# bash cal_sim.sh {{the path of .lst meta file}} {{the directory of synthesized audio}} {{path/wavlm_large_finetune.pth}}
+bash cal_sim.sh {lst_file_path} {synth_wav_dir} {{'path/wavlm_large_finetune.pth'}}
+```''')
+    print('--------------------------------------------------------------\n\n')
 
 
 if __name__ == "__main__":
@@ -272,11 +318,30 @@ if __name__ == "__main__":
 
     args = parse_args()
     
-    # switch here to test generation with zero-shot
-    args.gender='male'
-    args.pitch='moderate'
-    args.speed='moderate'
-    args.save_dir = 'example/seedtts-results-male_moderate_moderate'
+    if not os.path.exists(args.model_dir):
+        raise ValueError(f"Model directory does not exist: {args.model_dir}, please check the pretrained spark tts model path.")
     
+    cuda_visible_devices = args.cuda_visible_devices
+    if cuda_visible_devices is None:
+        print("No CUDA_VISIBLE_DEVICES specified,"
+              " using default CUDA_VISIBLE_DEVICES={}".format(os.environ.get("CUDA_VISIBLE_DEVICES", "")))
+    else:
+        # Set CUDA_VISIBLE_DEVICES environment variable
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices.strip()
+        print(f"Using CUDA_VISIBLE_DEVICES: {cuda_visible_devices}")
+    
+    # switch here to test generation with zero-shot
+    # args.gender='male'
+    # args.pitch='moderate'
+    # args.speed='moderate'
+    
+    # generate result for WER test set
+    # args.save_dir = 'outputs/seedtts/wer'
+    # args.dataset_split = 'test_wer'
+    
+    # # # # generate result for SIM test set
+    # args.save_dir = 'outputs/seedtts/sim'
+    # args.dataset_split = 'test_sim'
+
     main(args)
     

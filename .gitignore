@@ -178,3 +178,5 @@ outputs/*
 
 *.wav
 *.html
+
+pretrained_models*

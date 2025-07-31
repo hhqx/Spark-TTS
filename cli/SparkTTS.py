@@ -229,6 +229,7 @@ class SparkTTS:
 
         # Convert semantic tokens back to waveform
         if pred_semantic_ids.numel() == 0:
+            Warning('Predicted semantic IDs of text "{}" are empty. Returning None.'.format(text))
             return None
         
         wav = self.audio_tokenizer.detokenize(
